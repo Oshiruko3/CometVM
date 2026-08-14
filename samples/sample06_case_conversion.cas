@@ -1,0 +1,34 @@
+; ====================================================================
+; 学習用サンプル 06: 小文字 ➔ 大文字 変換 (ビットマスク論理演算)
+; 内容: 小文字 'a'〜'z' を大文字 'A'〜'Z' に変換します (Bit 5 を 0 に消去)。
+; 出力: STR が 'HELLO WORLD' に変換される
+; ====================================================================
+SAMPLE06 START
+         LAD     GR1, 0          ; インデックス GR1 = 0
+         LD      GR2, LEN        ; 長さ GR2 = 11
+
+LOOP     CPA     GR1, GR2
+         JZE     DONE
+
+         LD      GR3, STR, GR1   ; 文字読み込み
+         CPA     GR3, CHAR_A
+         JMI     NEXT            ; 'a' 未満ならスキップ
+         CPA     GR3, CHAR_Z
+         JPL     NEXT            ; 'z' 超過ならスキップ
+
+         ; 小文字範囲内なので Bit 5 をクリア (AND #FFDF)
+         AND     GR3, MASK_UPPER
+         ST      GR3, STR, GR1   ; 変換後の大文字をストア
+
+NEXT     LAD     GR1, 1, GR1
+         JUMP    LOOP
+
+DONE     OUT     STR, LEN        ; 'HELLO WORLD' と出力
+         RET
+
+STR      DC      'hello world'
+LEN      DC      11
+CHAR_A   DC      'a'
+CHAR_Z   DC      'z'
+MASK_UPPER DC    #FFDF           ; Bit 5 を 0 にマスク
+         END

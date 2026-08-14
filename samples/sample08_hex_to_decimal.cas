@@ -1,0 +1,30 @@
+; ====================================================================
+; 学習用サンプル 08: 16進文字 ➔ 数値 変換 ('A'〜'F', '0'〜'9')
+; 内容: ASCII文字 'F' (0x46) を数値 15 に変換します。
+; 入力: 'F'
+; 出力: GR0 = 15
+; ====================================================================
+SAMPLE08 START
+         LD      GR1, CHAR_HEX   ; 'F'
+         
+         CPA     GR1, CHAR_9
+         JZE     IS_DIGIT
+         JMI     IS_DIGIT        ; '0'〜'9' の場合
+
+         ; 'A'〜'F' の場合: 値 = 文字 - 'A' + 10
+         SUBA    GR1, CHAR_A
+         ADDA    GR1, TEN
+         LD      GR0, GR1
+         RET
+
+IS_DIGIT ; '0'〜'9' の場合: 値 = 文字 - '0'
+         SUBA    GR1, CHAR_0
+         LD      GR0, GR1
+         RET
+
+CHAR_HEX DC      'F'
+CHAR_0   DC      '0'
+CHAR_9   DC      '9'
+CHAR_A   DC      'A'
+TEN      DC      10
+         END

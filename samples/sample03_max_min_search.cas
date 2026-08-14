@@ -1,0 +1,39 @@
+; ====================================================================
+; 学習用サンプル 03: 配列内の最大値と最小値の探索
+; 内容: 配列をインデックス修飾で走査し、最大値と最小値を求めます。
+; 出力: GR0 = 最大値 (98), GR1 = 最小値 (3)
+; ====================================================================
+SAMPLE03 START
+         LAD     GR2, 0          ; インデックス GR2 = 0
+         LD      GR3, LEN        ; 配列長 GR3 = 8
+         
+         LD      GR0, ARRAY, GR2 ; GR0 (最大値の初期値) = ARRAY[0]
+         LD      GR1, ARRAY, GR2 ; GR1 (最小値の初期値) = ARRAY[0]
+
+LOOP     LAD     GR2, 1, GR2     ; インデックス ++
+         CPA     GR2, GR3
+         JZE     DONE            ; 配列の末尾に達したら終了
+
+         LD      GR4, ARRAY, GR2 ; 現在要素 GR4 = ARRAY[GR2]
+
+         ; 最大値の更新チェック
+         CPA     GR4, GR0
+         JPL     SET_MAX         ; GR4 > GR0 なら最大値更新
+
+CHECK_MIN:
+         ; 最小値の更新チェック
+         CPA     GR4, GR1
+         JMI     SET_MIN         ; GR4 < GR1 なら最小値更新
+         JUMP    LOOP
+
+SET_MAX  LD      GR0, GR4
+         JUMP    CHECK_MIN
+
+SET_MIN  LD      GR1, GR4
+         JUMP    LOOP
+
+DONE     RET                     ; GR0=最大値(98), GR1=最小値(3)
+
+ARRAY    DC      45, 12, 98, 3, 67, 89, 23, 54
+LEN      DC      8
+         END

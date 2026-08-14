@@ -1,0 +1,31 @@
+; ====================================================================
+; 学習用サンプル 10: スタック操作デモ (PUSH / POP / RPUSH / RPOP)
+; 内容: PUSH でデータを積み込み、LIFO (後入れ先出し) で POP 復元します。
+; 出力: GR1 = 30, GR2 = 20, GR3 = 10 (入れ替え完了)
+; ====================================================================
+SAMPLE10 START
+         LD      GR1, VAL10      ; GR1 = 10
+         LD      GR2, VAL20      ; GR2 = 20
+         LD      GR3, VAL30      ; GR3 = 30
+
+         ; 10, 20, 30 の順で PUSH
+         PUSH    0, GR1          ; Bottom: 10
+         PUSH    0, GR2          ; Middle: 20
+         PUSH    0, GR3          ; Top:    30
+
+         ; レジスタをクリア
+         LAD     GR1, 0
+         LAD     GR2, 0
+         LAD     GR3, 0
+
+         ; 逆順 (LIFO) で POP 復元
+         POP     GR1             ; GR1 = 30
+         POP     GR2             ; GR2 = 20
+         POP     GR3             ; GR3 = 10
+
+         RET
+
+VAL10    DC      10
+VAL20    DC      20
+VAL30    DC      30
+         END

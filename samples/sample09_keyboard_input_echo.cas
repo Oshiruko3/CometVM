@@ -1,0 +1,18 @@
+; ====================================================================
+; 学習用サンプル 09: キーボード入力 (IN) ＆ オウム返し出力 (OUT)
+; 内容: IN マクロ命令で入力された文字列を受け取り、OUT で表示します。
+; ====================================================================
+SAMPLE09 START
+         OUT     PROMPT, PROMPT_LEN ; 入力プロンプトを表示
+         IN      BUF, BUF_LEN       ; キーボード入力を取得
+         OUT     PREFIX, PRE_LEN    ; "You typed: " を出力
+         OUT     BUF, BUF_LEN       ; 入力文字列を出力
+         RET
+
+PROMPT   DC      'Input text: '
+PROMPT_LEN DC    12
+PREFIX   DC      'You typed: '
+PRE_LEN  DC      11
+BUF      DS      256
+BUF_LEN  DS      1
+         END

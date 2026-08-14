@@ -1,0 +1,5 @@
+# ビルド生成物
+vm/cometvm
+vm/*.o
+vm/src/*.o
+firmware/.pio/

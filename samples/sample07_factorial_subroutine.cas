@@ -1,0 +1,45 @@
+; ====================================================================
+; 学習用サンプル 07: サブルーチン呼出しによる階乗計算 (CALL / RET)
+; 内容: サブルーチン FACT を呼び出して N! を求めます。
+; 入力: N = 6
+; 出力: GR0 = 720 (6!)
+; ====================================================================
+SAMPLE07 START
+         LD      GR1, N          ; GR1 = 6
+         CALL    FACT            ; 階乗計算サブルーチン呼び出し
+         ; 結果 GR0 = 720
+         RET
+
+; --- サブルーチン: FACT ---
+; 入力: GR1 (N)
+; 出力: GR0 (N!)
+FACT     RPUSH                   ; レジスタ退避
+         LAD     GR0, 1          ; 積の初期値 GR0 = 1
+
+FACT_LOOP CPA    GR1, ONE
+         JMI     FACT_DONE       ; N <= 1 なら終了
+
+         ; GR0 = GR0 * GR1
+         CALL    MULT_GR0_GR1
+         SUBA    GR1, ONE
+         JUMP    FACT_LOOP
+
+FACT_DONE RPOP                   ; レジスタ復元
+         RET
+
+; 簡易乗算サブルーチン GR0 = GR0 * GR1
+MULT_GR0_GR1 RPUSH
+         LD      GR2, GR0
+         LAD     GR0, 0
+M_LOOP   CPA     GR1, ZERO
+         JZE     M_DONE
+         ADDA    GR0, GR2
+         SUBA    GR1, ONE
+         JUMP    M_LOOP
+M_DONE   RPOP
+         RET
+
+N        DC      6
+ONE      DC      1
+ZERO     DC      0
+         END

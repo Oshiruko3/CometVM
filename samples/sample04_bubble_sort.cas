@@ -1,0 +1,35 @@
+; ====================================================================
+; 学習用サンプル 04: バブルソート (昇順並べ替え)
+; 内容: 配列要素を比較し、小さい順 (昇順) に並べ替えます。
+; 出力: ARRAY が [11, 12, 22, 25, 34, 64, 90] にソートされる
+; ====================================================================
+SAMPLE04 START
+         LD      GR1, LEN        ; 外側カウンタ GR1 = LEN - 1
+         SUBA    GR1, ONE
+
+OUTER    LAD     GR2, 0          ; 内側インデックス GR2 = 0
+
+INNER    LD      GR3, ARRAY, GR2 ; GR3 = ARRAY[i]
+         LAD     GR2, 1, GR2     ; i++
+         LD      GR4, ARRAY, GR2 ; GR4 = ARRAY[i+1]
+
+         CPA     GR3, GR4
+         JPL     SWAP            ; ARRAY[i] > ARRAY[i+1] なら交換
+
+NEXT     CPA     GR2, GR1
+         JMI     INNER           ; i < N-1 なら継続
+
+         SUBA    GR1, ONE        ; N--
+         JNZ     OUTER           ; N > 0 なら継続
+         RET
+
+SWAP     LAD     GR5, 0, GR2     ; GR5 = i+1（GR2は既にインクリメント済み）
+         SUBA    GR5, ONE        ; GR5 = i
+         ST      GR4, ARRAY, GR5 ; ARRAY[i] = GR4（元の i+1 の値）
+         ST      GR3, ARRAY, GR2 ; ARRAY[i+1] = GR3（元の i の値）
+         JUMP    NEXT
+
+ARRAY    DC      64, 34, 25, 12, 22, 11, 90
+LEN      DC      7
+ONE      DC      1
+         END
