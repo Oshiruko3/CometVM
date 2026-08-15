@@ -52,6 +52,7 @@ static char g_buf[kBufSize];
 static int g_bufLen = 0;
 static int g_cursor = 0;  // バッファ内カーソル位置
 static int g_scroll = 0;  // 表示開始行（スクロール）
+static int g_hScroll = 0; // 表示開始列（水平スクロール・8/15: 24文字超の行の見切れ対策）
 
 // ---- アセンブル結果（ASM/RUNモードで使用） ----
 static casl::AsmResult g_asm;
@@ -59,6 +60,12 @@ static casl::AsmResult g_asm;
 // ---- OUT出力バッファ（RUNモード） ----
 static char g_outBuf[512];
 static int g_outLen = 0;
+
+// ---- RUN結果の表示行（スクロール対応・8/15共同開発時に確認した提案） ----
+// OUT出力（改行で分割）+ レジスタ表示を、行のリストとして保持する
+static constexpr int kResultMaxLines = 16;
+static char g_resultLines[kResultMaxLines][kCols + 1];
+static int g_resultLineCount = 0;
 
 // ---- メッセージ行 ----
 static char g_msg[64] = "Ready.";  // メッセージ行（6行目）·ヒントは7行目の専用バー
@@ -146,6 +153,11 @@ static void ensureCursorVisible()
     if (row < g_scroll) g_scroll = row;
     if (row >= g_scroll + kWinRows) g_scroll = row - kWinRows + 1;
     if (g_scroll < 0) g_scroll = 0;
+    // 水平スクロール（8/15追加）: カーソルの列が表示範囲外なら開始列を調整
+    int col = bufColOf(g_cursor);
+    if (col < g_hScroll) g_hScroll = col;
+    if (col >= g_hScroll + kCols) g_hScroll = col - kCols + 1;
+    if (g_hScroll < 0) g_hScroll = 0;
 }
 
 // カーソルを含む行の先頭位置
@@ -256,25 +268,23 @@ static void drawStatus()
 static void drawText()
 {
     if (g_mode == Mode::RUN) {
-        // 実行結果（OUT出力）を表示
-        int line = 0, pos = 0;
-        while (pos <= g_outLen && line < kWinRows) {
-            char outLine[kCols + 1];
-            int len = 0;
-            while (pos < g_outLen && g_outBuf[pos] != '\n' && len < kCols) {
-                outLine[len++] = g_outBuf[pos++];
-            }
-            outLine[len] = '\0';
-            drawStringFit(outLine, 0, (1 + line) * kCharH);
-            line++;
-            if (pos < g_outLen && g_outBuf[pos] == '\n') pos++;
+        // 実行結果（OUT出力+レジスタ表示）をスクロール表示（8/15・共同開発時に確認した提案）
+        for (int i = 0; i < kWinRows; i++) {
+            int idx = g_scroll + i;
+            if (idx < 0 || idx >= g_resultLineCount) break;
+            drawStringFit(g_resultLines[idx], 0, (1 + i) * kCharH);
         }
     } else {
-        // ソース表示（スクロール対応）
+        // ソース表示（スクロール対応・8/15: 水平スクロール対応）
         for (int i = 0; i < kWinRows; i++) {
-            char line[kCols + 1];
+            // 行全体を取得（kCols+1だと25文字で切れ、水平スクロール時に
+            // 25文字目以降が空欄になるバグ——8/15修正: 80文字まで取る）
+            char line[80];
             getLineText(g_scroll + i, line, sizeof(line));
-            drawStringFit(line, 0, (1 + i) * kCharH);
+            // 水平スクロール位置から表示（24文字幅・drawStringFitが切る）
+            size_t len = strlen(line);
+            drawStringFit(len > (size_t)g_hScroll ? line + g_hScroll : "", 0,
+                          (1 + i) * kCharH);
         }
     }
 }
@@ -284,8 +294,8 @@ static void drawCursor()
 {
     if (g_mode != Mode::PRO) return;
     int row = bufRowOf(g_cursor) - g_scroll;
-    int col = bufColOf(g_cursor);
-    if (row < 0 || row >= kWinRows || col >= kCols) return;
+    int col = bufColOf(g_cursor) - g_hScroll;  // 水平スクロール分を引く（8/15）
+    if (row < 0 || row >= kWinRows || col < 0 || col >= kCols) return;
     int x = col * kCharW;
     int y = (1 + row) * kCharH;
     lcd.fillRect(x, y, kCharW, kCharH, 0xFFFF);  // 白背景
@@ -328,7 +338,34 @@ static void runAssemble()
     if (g_asm.ok) {
         snprintf(g_msg, sizeof(g_msg), "OK: %d words. FN>RUN", g_asm.obj_words);
     } else {
-        snprintf(g_msg, sizeof(g_msg), "ERR: %s", g_asm.error.c_str());
+        // エラー表示（8/15・B2・共同開発時に確認した提案で簡略化）:
+        // 「ERR: #行番号: 種別」の形——ラベル名等の詳細は含めない
+        // （PROモードでソースを確認すればわかる。行番号が#100でも見切れない。
+        //   日本語はAsciiFont8x16で描画できないため種別のみASCII抽出）
+        std::string err = g_asm.error;
+        std::string lineNo;
+        size_t pos = err.find("（行");
+        if (pos != std::string::npos) {
+            size_t end = err.find("）", pos);
+            if (end != std::string::npos) {
+                // 「（行」はUTF-8で6バイト（3+3）——6バイトスキップして行番号を取る
+                // ※8/15修正: pos+2だと「（」の残りバイトが混入し「#？3」になるバグ
+                lineNo = err.substr(pos + 6, end - pos - 6);
+            }
+        }
+        // 種別（「: 」の前まで）をASCII化
+        std::string kind = err.substr(0, err.find(":"));
+        std::string ascii;
+        for (char c : kind) {
+            if ((unsigned char)c >= 0x20 && (unsigned char)c < 0x7F) {
+                ascii += c;
+            }
+        }
+        if (!lineNo.empty()) {
+            snprintf(g_msg, sizeof(g_msg), "ERR: #%s: %s", lineNo.c_str(), ascii.c_str());
+        } else {
+            snprintf(g_msg, sizeof(g_msg), "ERR: %s", ascii.c_str());
+        }
     }
 }
 
@@ -358,20 +395,69 @@ static void runProgram()
     g_outLen = 0;
     c->out_func = runOutput;
 
-    // 実行（PCがオブジェクト領域外に出るか、ステップ上限で終了）
-    uint16_t endAddr = comet::OBJ_BASE + g_asm.obj_words;
+    // 実行（トップレベルRET（SP==0のRET）で終了——test_learningで確立した方式・8/15）
+    // ※従来は「PCがオブジェクト領域外」で終了していたが、RET後のメモリ0からの
+    //   再実行が残る問題があった（PC=0からNOPを進みオブジェクト先頭に戻る）
     int steps = 0;
     const int kMaxSteps = 10000;
+    bool normalEnd = false;
     while (steps < kMaxSteps) {
+        uint16_t opw = c->readWord(c->PC);
+        uint8_t op = static_cast<uint8_t>(opw >> 8);
+        if (op == comet::OP_RET && c->SP == 0) {
+            normalEnd = true;  // プログラム正常終了
+            break;
+        }
         comet::step(*c);
         steps++;
-        if (c->PC < comet::OBJ_BASE || c->PC >= endAddr) break;
     }
 
-    if (steps >= kMaxSteps) {
-        snprintf(g_msg, sizeof(g_msg), "STOP: step limit GR1=%d", c->GR[1]);
+    // ---- 実行結果の表示行を構築（8/15・共同開発時に確認した提案でスクロール対応） ----
+    g_resultLineCount = 0;
+    // OUT出力を改行で分割して行に
+    // ※8/15修正: 条件を「pos < g_outLen」に——「pos <= g_outLen」だと出力終了後に
+    //   posが進まず空行が16行埋まり、レジスタ表示の追加がスキップされるバグだった
+    {
+        int pos = 0;
+        while (pos < g_outLen && g_resultLineCount < kResultMaxLines) {
+            char* line = g_resultLines[g_resultLineCount];
+            int len = 0;
+            while (pos < g_outLen && g_outBuf[pos] != '\n' && len < kCols) {
+                line[len++] = g_outBuf[pos++];
+            }
+            line[len] = '\0';
+            g_resultLineCount++;
+            if (pos < g_outLen && g_outBuf[pos] == '\n') pos++;
+        }
+    }
+    // レジスタ・フラグ表示を追加（GR0〜GR7・FR・PC・SP）
+    if (g_resultLineCount < kResultMaxLines) {
+        snprintf(g_resultLines[g_resultLineCount], kCols + 1,
+                 "G0=%04X G1=%04X G2=%04X G3=%04X",
+                 c->GR[0] & 0xFFFF, c->GR[1] & 0xFFFF,
+                 c->GR[2] & 0xFFFF, c->GR[3] & 0xFFFF);
+        g_resultLineCount++;
+    }
+    if (g_resultLineCount < kResultMaxLines) {
+        snprintf(g_resultLines[g_resultLineCount], kCols + 1,
+                 "G4=%04X G5=%04X G6=%04X G7=%04X",
+                 c->GR[4] & 0xFFFF, c->GR[5] & 0xFFFF,
+                 c->GR[6] & 0xFFFF, c->GR[7] & 0xFFFF);
+        g_resultLineCount++;
+    }
+    if (g_resultLineCount < kResultMaxLines) {
+        snprintf(g_resultLines[g_resultLineCount], kCols + 1,
+                 "FR=%02X PC=%04X SP=%04X",
+                 c->FR & 0xFF, c->PC, c->SP);
+        g_resultLineCount++;
+    }
+    // スクロールを先頭に戻す
+    g_scroll = 0;
+
+    if (!normalEnd) {
+        snprintf(g_msg, sizeof(g_msg), "STOP: limit %dst GR1=%d", steps, c->GR[1]);
     } else {
-        snprintf(g_msg, sizeof(g_msg), "RUN OK (%d steps) GR1=%d", steps, c->GR[1]);
+        snprintf(g_msg, sizeof(g_msg), "RUN OK %dst GR1=%d", steps, c->GR[1]);
     }
     delete c;
 }
@@ -499,14 +585,28 @@ void loop()
                     runProgram();
                     drawScreen();
                     break;
-                case ';':  // FN+;: ↑（Cardputerのキーボード刻印に合わせる）
-                    moveCursorUp();
+                case ';':  // FN+;: ↑（RUNモードでは結果表示のスクロール・8/15）
+                    if (g_mode == Mode::RUN) {
+                        if (g_scroll > 0) {
+                            g_scroll--;
+                            drawScreen();
+                        }
+                    } else {
+                        moveCursorUp();
+                    }
                     break;
                 case ',':  // FN+,: ←
                     moveCursorLeft();
                     break;
-                case '.':  // FN+.: ↓
-                    moveCursorDown();
+                case '.':  // FN+.: ↓（RUNモードでは結果表示のスクロール・8/15）
+                    if (g_mode == Mode::RUN) {
+                        if (g_scroll + kWinRows < g_resultLineCount) {
+                            g_scroll++;
+                            drawScreen();
+                        }
+                    } else {
+                        moveCursorDown();
+                    }
                     break;
                 case '/':  // FN+/: →
                     moveCursorRight();
