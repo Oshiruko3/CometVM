@@ -47,9 +47,10 @@ static const InstInfo kInstList[] = {
     {"ADDA", OP_ADDA, 2}, {"ADDL", OP_ADDL, 2},
     {"SUBA", OP_SUBA, 2}, {"SUBL", OP_SUBL, 2},
     {"AND",  OP_AND,  2}, {"OR",  OP_OR,  2}, {"XOR", OP_XOR, 2},
-    {"CPA",  OP_CPA,  2},
-    {"SLL",  OP_SLL,  4}, {"SRL", OP_SRL, 4},
-    {"JMP",  OP_JMP,  3}, {"JPZ", OP_JPZ, 3}, {"JNZ", OP_JNZ, 3},
+    {"CPA",  OP_CPA,  2}, {"CPL", OP_CPL, 2},
+    {"SLL",  OP_SLL,  4}, {"SLA", OP_SLA, 4}, {"SRL", OP_SRL, 4}, {"SRA", OP_SRA, 4},  // SLA=算術左シフト（ビット15保持・8/13修正）・SRA=算術右シフト（8/13追加）
+    {"JMP",  OP_JMP,  3}, {"JUMP", OP_JMP, 3},  // JUMPはJMPの別名（t10.casの記法）
+    {"JPZ",  OP_JPZ,  3}, {"JZE", OP_JZE, 3}, {"JNZ", OP_JNZ, 3},  // JZEは独立命令（8/13修正: 従来JPZの別名だった誤り）
     {"JMI",  OP_JMI,  3}, {"JPL", OP_JPL, 3}, {"JOV", OP_JOV, 3},
     {"CALL", OP_CALL, 3},
     {"RET",  OP_RET,  0}, {"NOP", OP_NOP, 0},
@@ -98,8 +99,11 @@ struct Line {
 };
 
 static bool parseLine(const std::string& raw, Line& line) {
+    // CRLF対応: 行末の\rを除去（8/13追加: 共同開発時に確認したサンプルがWindows改行）
+    std::string raw2 = raw;
+    if (!raw2.empty() && raw2.back() == '\r') raw2.pop_back();
     // コメント除去
-    std::string s = raw;
+    std::string s = raw2;
     size_t semi = s.find(';');
     if (semi != std::string::npos) s = s.substr(0, semi);
     s = trim(s);
@@ -121,19 +125,47 @@ static bool parseLine(const std::string& raw, Line& line) {
         // 「:」付きラベル（例: "X:"）
         line.label = t1.substr(0, t1.size() - 1);
         remaining = trim(remaining);
-        if (remaining.empty()) return false;  // ラベルのみの行
+        if (remaining.empty()) return true;  // ラベルのみの行（8/13修正: ラベル定義として有効——共同開発時に確認したtest01）
         std::istringstream iss2(remaining);
         iss2 >> line.inst;
         std::getline(iss2, rest);
     } else if (isInst(t1)) {
-        // 命令コード
-        line.inst = t1;
-        rest = remaining;
+        // 最初のトークンが命令コード——でも、次のトークンも命令なら、
+        // t1は命令名と同名のラベル（例: t03.casの "AND   START"）
+        std::string t2;
+        {
+            std::istringstream iss2(remaining);
+            iss2 >> t2;
+        }
+
+        if (!t2.empty()) {
+            // 命令名と同名のラベルの判定を厳密化（8/13修正: t10.casのJPL ENDを誤解釈）
+            bool t1m = findInst(upper(t1)) != nullptr;   // t1が機械語命令
+            bool t2m = findInst(upper(t2)) != nullptr;   // t2が機械語命令
+            if ((t1m && upper(t2) == "START") ||  // AND START: t1はラベル（t03.cas）
+                (isMacroInst(upper(t1)) && upper(t2) == "START") ||  // RPUSH START: t1はラベル（rpush.cas・8/13追加。マクロ命令名と同名のラベル）
+                (t1m && (upper(t2) == "DC" || upper(t2) == "DS")) ||  // ST DC: t1はラベル（a01.cas・8/13追加。命令+DC/DSの組み合わせは存在しないため曖昧さなし）
+                ((upper(t1) == "RET" || upper(t1) == "NOP") && (upper(t2) == "RET" || upper(t2) == "NOP")) ||  // RET RET: t1はラベル（c01.cas・8/13追加。t1自体がオペランドなし命令の場合のみ——JZE RETは巻き込まない）
+                (upper(t1) == "END") ||           // END RPOP: t1はラベル（c11.cas・8/13追加。ENDはオペランドを取らない疑似命令——JPL ENDはt1=JPLなので影響なし）
+                (!t1m && t2m)) {                  // END RET: t1はラベル（t10.cas）
+                line.label = t1;
+                remaining = trim(remaining);
+                std::istringstream iss3(remaining);
+                iss3 >> line.inst;
+                std::getline(iss3, rest);
+            } else {
+                line.inst = t1;  // JPL END等: t1は命令（ENDはオペランド）
+                rest = remaining;
+            }
+        } else {
+            line.inst = t1;
+            rest = remaining;
+        }
     } else {
         // 「:」なしのラベル（例: "X    DC 5"）
         line.label = t1;
         remaining = trim(remaining);
-        if (remaining.empty()) return false;  // ラベルのみの行
+        if (remaining.empty()) return true;  // ラベルのみの行（8/13修正: ラベル定義として有効）
         std::istringstream iss2(remaining);
         iss2 >> line.inst;
         std::getline(iss2, rest);
@@ -194,10 +226,73 @@ static bool parseInt(const std::string& s, int& val) {
     return true;
 }
 
-// 文字列定数の解析（'ABC' 形式）
-static bool parseCharConst(const std::string& s, std::string& out) {
-    if (s.size() < 2 || s.front() != '\'' || s.back() != '\'') return false;
-    out = s.substr(1, s.size() - 2);
+// DCオペランドを解析してワード列を返す（成功時true）
+// 'A'形式の文字定数・'ABC'形式の文字列・数値定数・カンマ区切りに対応
+// ※8/13修正: カンマ区切りの文字定数リスト（'G','U',...）が、旧parseCharConstで
+// オペランドをカンマ分割（引用符内のカンマは分割しない・8/13修正: c05.casの=','）
+static std::vector<std::string> splitOperand(const std::string& s) {
+    std::vector<std::string> tokens;
+    std::string cur;
+    bool inQuote = false;
+    for (char ch : s) {
+        if (ch == '\'') inQuote = !inQuote;
+        if (ch == ',' && !inQuote) {
+            tokens.push_back(cur);
+            cur.clear();
+        } else {
+            cur += ch;
+        }
+    }
+    tokens.push_back(cur);
+    return tokens;
+}
+
+//   引用符・カンマごと1つの文字列として誤解析されるバグを修正（test_evenoddで発見）
+static bool parseDC(const std::string& operand, std::vector<uint16_t>& words, std::string& err,
+                   const std::map<std::string, int>& labels, bool resolveLabels) {
+    // カンマ分割（引用符内のカンマは分割しない・8/13修正: c05.casの'21,569,1387'）
+    std::vector<std::string> tokens;
+    std::string cur;
+    bool inQuote = false;
+    for (char ch : operand) {
+        if (ch == '\'') inQuote = !inQuote;
+        if (ch == ',' && !inQuote) {
+            tokens.push_back(cur);
+            cur.clear();
+        } else {
+            cur += ch;
+        }
+    }
+    tokens.push_back(cur);
+    for (auto& tok : tokens) {
+        tok = trim(tok);
+        if (tok.empty()) continue;
+        if (tok.size() >= 2 && tok.front() == '\'' && tok.back() == '\'') {
+            // 文字定数（'A' = 1文字・'ABC' = 複数文字を1文字ずつ）
+            std::string inner = tok.substr(1, tok.size() - 2);
+            for (char c : inner) {
+                words.push_back(static_cast<uint8_t>(c));
+            }
+        } else if (labels.count(tok)) {
+            // ラベル参照（LAST DC LAST 等）: ラベルのアドレス値（8/13追加・t15.cas）
+            words.push_back(OBJ_BASE + labels.at(tok));
+        } else {
+            // 数値定数
+            int val = 0;
+            if (parseInt(tok, val)) {
+                words.push_back(static_cast<uint16_t>(val));
+            } else if (!resolveLabels) {
+                words.push_back(0);  // 第1パス: 後方参照のラベルは未登録——0を仮配置（サイズ計算のみ）
+            } else {
+                err = tok;
+                return false;
+            }
+        }
+    }
+    if (words.empty()) {
+        err = operand;
+        return false;
+    }
     return true;
 }
 
@@ -205,7 +300,14 @@ static bool parseCharConst(const std::string& s, std::string& out) {
 AsmResult assemble(const std::string& source) {
     AsmResult result;
     std::vector<Line> lines;
-    std::map<std::string, int> labels;  // ラベル → オフセット（#1000からの相対）
+    // 8/14修正: ラベルはプログラム（START〜END）ごとにスコープされる（CASL2仕様）
+    // 区間ごとのラベルマップ + 入口名（STARTラベル・他区間から参照可能）
+    std::vector<std::map<std::string, int>> sectionLabels;
+    std::map<std::string, int> entryNames;
+    int currentSection = -1;  // STARTで区間開始（test10の複数プログラム対応）
+    // リテラル（=定数）: 出現順のキーリストと、キー → 相対オフセット（8/13追加）
+    std::vector<std::string> literalKeys;
+    std::map<std::string, int> literalPos;
 
     // ---- 行の分割・解析 ----
     std::istringstream iss(source);
@@ -223,27 +325,41 @@ AsmResult assemble(const std::string& source) {
     // ---- 第1パス: 各命令のサイズ計算とラベル解決 ----
     int offset = 0;
     for (auto& line : lines) {
+        const std::string& inst = line.inst;
+        if (inst == "START") {
+            // 新しいプログラム（区間）の開始——8/14修正: ラベルのスコープを区間ごとに
+            currentSection++;
+            sectionLabels.push_back({});
+        }
         if (!line.label.empty()) {
-            if (labels.count(line.label)) {
+            if (currentSection < 0) {
+                result.error = "LABEL ERROR: START前にラベル '" + line.label + "'（行" +
+                               std::to_string(line.lineNo) + "）";
+                return result;
+            }
+            if (sectionLabels[currentSection].count(line.label)) {
                 result.error = "LABEL ERROR: ラベル '" + line.label + "' が重複（行" +
                                std::to_string(line.lineNo) + "）";
                 return result;
             }
-            labels[line.label] = offset;
+            sectionLabels[currentSection][line.label] = offset;
+            if (inst == "START") {
+                // STARTのラベルは入口名として他区間から参照可能（CASL2仕様）
+                entryNames[line.label] = offset;
+            }
         }
-        const std::string& inst = line.inst;
+        if (inst.empty()) continue;  // ラベルのみの行（8/13修正: サイズ0）
         if (isAssemblerInst(inst)) {
             if (inst == "DC") {
-                // 定数の数だけワード（文字列は2文字/ワード）
-                std::string cs;
-                if (parseCharConst(line.operand, cs)) {
-                    offset += static_cast<int>(cs.size());  // 1文字1ワード（COMET II仕様）
-                } else {
-                    // カンマ区切りの定数
-                    int count = 1;
-                    for (char ch : line.operand) if (ch == ',') count++;
-                    offset += count;
+                // parseDCでワード数を計算（文字定数・数値定数・カンマ区切りに対応）
+                std::vector<uint16_t> words;
+                std::string err;
+                if (!parseDC(line.operand, words, err, sectionLabels[currentSection], false)) {
+                    result.error = "OPERAND ERROR: DCの定数が不正 '" + err + "'（行" +
+                                   std::to_string(line.lineNo) + "）";
+                    return result;
                 }
+                offset += static_cast<int>(words.size());
             } else if (inst == "DS") {
                 int n = 0;
                 if (!parseInt(line.operand, n) || n < 0) {
@@ -255,7 +371,7 @@ AsmResult assemble(const std::string& source) {
             }
             // START/ENDはサイズなし
         } else if (isMacroInst(inst)) {
-            offset += 5;  // RPUSH/RPOPは5命令に展開
+            offset += 7;  // RPUSH/RPOPは7命令に展開（GR1〜GR7・8/13修正: 従来5命令と誤り）
         } else {
             auto it = findInst(inst);
             if (it == nullptr) {
@@ -268,35 +384,53 @@ AsmResult assemble(const std::string& source) {
             if (type == 2 || type == 3 || type == 4) offset += 2;
             else if (type == 5) offset += 3;  // IN/OUTは2アドレス
             else offset += 1;
+
+            // リテラル（=定数）の収集（命令のオペランドから・8/13修正: splitOperandで引用符内カンマ対応）
+            for (auto& tok2 : splitOperand(line.operand)) {
+                tok2 = trim(tok2);
+                if (tok2.size() >= 2 && tok2[0] == '=') {
+                    std::string key = tok2.substr(1);
+                    if (!literalPos.count(key)) literalKeys.push_back(key);
+                }
+            }
         }
     }
 
+    // リテラル（=定数）の配置位置を決定（プログラム全体の後に配置）
+    int literalBase = offset;
+    for (size_t i = 0; i < literalKeys.size(); i++) {
+        literalPos[literalKeys[i]] = literalBase + static_cast<int>(i);
+    }
+    offset += static_cast<int>(literalKeys.size());
+
     // ---- 第2パス: 機械語生成 ----
 
+    // ---- 第2パス: コード生成 ----
+    int section = -1;
     for (auto& line : lines) {
         const std::string& inst = line.inst;
+        if (inst == "START") {
+            section++;
+            if (section >= static_cast<int>(sectionLabels.size())) sectionLabels.push_back({});
+        }
+        if (inst.empty()) continue;  // ラベルのみの行（8/13修正: コード生成なし）
+        // 参照解決用: 現在の区間のラベル + 入口名（8/14修正: ラベルスコープ対応）
+        std::map<std::string, int> visibleLabels =
+            (section >= 0) ? sectionLabels[section] : std::map<std::string, int>{};
+        for (auto& [name, addr] : entryNames) {
+            if (!visibleLabels.count(name)) visibleLabels[name] = addr;
+        }
         if (isAssemblerInst(inst)) {
             if (inst == "DC") {
-                std::string cs;
-                if (parseCharConst(line.operand, cs)) {
-                    // 文字列: 1文字1ワード（COMET II仕様: DC 'A' = 0x0041）
-                    for (size_t i = 0; i < cs.size(); i++) {
-                        result.obj.push_back(static_cast<uint8_t>(cs[i]));
-                    }
-                } else {
-                    // カンマ区切りの数値定数
-                    std::istringstream ops(line.operand);
-                    std::string tok;
-                    while (std::getline(ops, tok, ',')) {
-                        tok = trim(tok);
-                        int val = 0;
-                        if (!parseInt(tok, val)) {
-                            result.error = "OPERAND ERROR: DCの定数が不正 '" + tok +
-                                           "'（行" + std::to_string(line.lineNo) + "）";
-                            return result;
-                        }
-                        result.obj.push_back(static_cast<uint16_t>(val));
-                    }
+                std::vector<uint16_t> words;
+                std::string err;
+                if (!parseDC(line.operand, words, err, visibleLabels, true)) {
+                    result.error = "OPERAND ERROR: DCの定数が不正 '" + err + "'（行" +
+                                   std::to_string(line.lineNo) + "）";
+                    return result;
+                }
+                for (auto w : words) {
+                    result.obj.push_back(w);
                 }
             } else if (inst == "DS") {
                 int n = 0;
@@ -309,14 +443,14 @@ AsmResult assemble(const std::string& source) {
         }
 
         if (isMacroInst(inst)) {
-            // RPUSH: PUSH GR0〜GR4 / RPOP: POP GR4〜GR0
+            // RPUSH: PUSH GR1〜GR7（GR0は戻り値用で対象外・8/13修正） / RPOP: POP GR7〜GR1
             if (inst == "RPUSH") {
-                for (int g = 0; g <= 4; g++) {
-                    result.obj.push_back(static_cast<uint16_t>((OP_PUSH << 8) | (g << 3)));
+                for (int g = 1; g <= 7; g++) {
+                    result.obj.push_back(static_cast<uint16_t>((OP_PUSH << 8) | (g << 4)));
                 }
             } else {
-                for (int g = 4; g >= 0; g--) {
-                    result.obj.push_back(static_cast<uint16_t>((OP_POP << 8) | (g << 3)));
+                for (int g = 7; g >= 1; g--) {
+                    result.obj.push_back(static_cast<uint16_t>((OP_POP << 8) | (g << 4)));
                 }
             }
             continue;
@@ -337,57 +471,51 @@ AsmResult assemble(const std::string& source) {
 
 
         if (type == 1) {  // grのみ（PUSH/POP）
-            if (!parseGR(line.operand, gr)) {
+            // 「PUSH 0,GR1」形式（a04.cas: アドレス0,指標GR1の記法）にも対応——カンマ分割してGRを検出
+            bool foundGR = false;
+            for (auto& tok1 : splitOperand(line.operand)) {
+                if (parseGR(trim(tok1), gr)) { foundGR = true; break; }
+            }
+            if (!foundGR) {
                 result.error = "OPERAND ERROR: GRの指定が不正 '" + line.operand +
                                "'（行" + std::to_string(line.lineNo) + "）";
                 return result;
             }
         } else if (type == 2 || type == 4) {  // gr,adr[,xr] または gr,定数
-            std::istringstream ops(line.operand);
-            std::string gs, as;
-            if (!std::getline(ops, gs, ',')) {
+            auto ops = splitOperand(line.operand);
+            if (ops.size() < 2 || !parseGR(trim(ops[0]), gr)) {
                 result.error = "OPERAND ERROR: オペランドが不足（行" +
                                std::to_string(line.lineNo) + "）";
                 return result;
             }
-            if (!parseGR(trim(gs), gr)) {
-                result.error = "OPERAND ERROR: GRの指定が不正 '" + gs +
-                               "'（行" + std::to_string(line.lineNo) + "）";
-                return result;
-            }
-            std::getline(ops, as, ',');
-            adrStr = trim(as);
+            adrStr = trim(ops[1]);
 
             // 指標レジスタ（3つ目のオペランド）
-            std::string xs;
-            if (std::getline(ops, xs, ',')) {
-                if (!parseGR(trim(xs), xr)) {
-                    result.error = "OPERAND ERROR: XRの指定が不正 '" + xs +
+            if (ops.size() >= 3) {
+                if (!parseGR(trim(ops[2]), xr)) {
+                    result.error = "OPERAND ERROR: XRの指定が不正 '" + ops[2] +
                                    "'（行" + std::to_string(line.lineNo) + "）";
                     return result;
                 }
             }
         } else if (type == 3 || type == 5) {  // adr[,xr] または adr,len
-            std::istringstream ops(line.operand);
-            std::string as;
-            if (!std::getline(ops, as, ',')) {
+            auto ops = splitOperand(line.operand);
+            if (ops.size() < 1) {
                 result.error = "OPERAND ERROR: アドレスが不足（行" +
                                std::to_string(line.lineNo) + "）";
                 return result;
             }
-            adrStr = trim(as);
+            adrStr = trim(ops[0]);
 
             // IN/OUTは2つ目のオペランド（len領域）を保持
             if (type == 5) {
-                std::string xs;
-                if (std::getline(ops, xs, ',')) {
-                    lenStr = trim(xs);
+                if (ops.size() >= 2) {
+                    lenStr = trim(ops[1]);
                 }
             } else {
-                std::string xs;
-                if (std::getline(ops, xs, ',')) {
-                    if (!parseGR(trim(xs), xr)) {
-                        result.error = "OPERAND ERROR: XRの指定が不正 '" + xs +
+                if (ops.size() >= 2) {
+                    if (!parseGR(trim(ops[1]), xr)) {
+                        result.error = "OPERAND ERROR: XRの指定が不正 '" + ops[1] +
                                        "'（行" + std::to_string(line.lineNo) + "）";
                         return result;
                     }
@@ -395,38 +523,88 @@ AsmResult assemble(const std::string& source) {
             }
         }
 
-        // ワード1: [opcode][gr][xr]
-        uint16_t w1 = static_cast<uint16_t>((opcode << 8) | (gr << 3) | xr);
+        // LD gr,gr（レジスタ間転送）→ ワード2を 0xFF00|gr2 形式に（8/13修正: b07.casで発見）
+        // ※従来は「LAD gr,0,gr2 変換」だったが、GR0は指標レジスタにできないため
+        //   「LD GR5,GR0」が xr=0 になり GR5=0 に壊れていた。
+        //   0xFF00|gr2 形式は VM の getOperand がレジスタ間として解釈する（GR0でも動く）
+        if (opcode == OP_LD && !adrStr.empty()) {
+            int reg2 = 0;
+            if (parseGR(adrStr, reg2)) {
+                char buf[16];
+                snprintf(buf, sizeof(buf), "#FF%02X", reg2);
+                adrStr = buf;  // ワード2 = 0xFF00 | reg2（レジスタ間指定）
+            }
+        }
+
+        // ワード1: [opcode][gr][xr]（8/14修正: GRはbit7-4・XRはbit3-0の8-4-4形式——test14の#1070対応）
+        uint16_t w1 = static_cast<uint16_t>((opcode << 8) | (gr << 4) | xr);
         result.obj.push_back(w1);
 
         // ワード2: アドレス（アドレスを取る命令のみ）
         if (type == 2 || type == 3 || type == 4 || type == 5) {
             int addr = 0;
-            if (type == 4) {
-                // SLL/SRL: シフト量（定数）
-                if (!parseInt(adrStr, addr) || addr < 0 || addr > 15) {
-                    result.error = "OPERAND ERROR: シフト量が不正 '" + adrStr +
-                                   "'（行" + std::to_string(line.lineNo) + "）";
-                    return result;
-                }
-            } else {
-                // ラベル or 定数
-                if (!adrStr.empty() && labels.count(adrStr)) {
+            // 8/13修正: シフト量も実行アドレス（adr + GR[xr]）——type 4も共通の解決に
+            // （従来は定数のみ・c10.casのSRA GR0,-1,GR2が不正とされた）
+            {
+                // ラベル・定数・リテラル
+                if (adrStr.empty()) {
+                    addr = 0;  // レジスタ間転送（LAD gr,0,gr2 変換）の場合
+                } else if (adrStr[0] == '=') {
+                    // リテラル（=定数）: DCを自動配置した番地を参照
+                    std::string key = adrStr.substr(1);
+                    if (literalPos.count(key)) {
+                        addr = OBJ_BASE + literalPos[key];
+                    } else {
+                        result.error = "LITERAL ERROR: リテラル '" + adrStr +
+                                       "' が見つからない（行" +
+                                       std::to_string(line.lineNo) + "）";
+                        return result;
+                    }
+                } else if (!adrStr.empty() && visibleLabels.count(adrStr)) {
                     // オフセット（語単位）→ 語アドレス（OBJ_BASE + オフセット）
-                    addr = OBJ_BASE + labels[adrStr];
-                } else if (parseInt(adrStr, addr)) {
-                    addr &= 0xFFFF;
-                } else if (type == 5) {
-                    // IN/OUTの領域はラベル必須
-                    result.error = "LABEL ERROR: アドレス '" + adrStr +
-                                   "' が見つからない（行" +
-                                   std::to_string(line.lineNo) + "）";
-                    return result;
+                    addr = OBJ_BASE + visibleLabels[adrStr];
                 } else {
-                    result.error = "LABEL ERROR: ラベル '" + adrStr +
-                                   "' が見つからない（行" +
-                                   std::to_string(line.lineNo) + "）";
-                    return result;
+                    // ラベル±定数（例: TARGET_INSTR+1・8/14追加: 共同開発時に確認したtest14自己書き換え）
+                    // → 数値 → レジスタ間指定の順に解決
+                    bool resolved = false;
+                    size_t i = 0;
+                    while (i < adrStr.size() &&
+                           (isalpha(adrStr[i]) || isdigit(adrStr[i]) || adrStr[i] == '_')) {
+                        i++;
+                    }
+                    if (i > 0 && i < adrStr.size()) {
+                        std::string labelPart = adrStr.substr(0, i);
+                        std::string rest = adrStr.substr(i);
+                        if (!rest.empty() && rest[0] == '+') rest = rest.substr(1);
+                        int delta = 0;
+                        if (visibleLabels.count(labelPart) && parseInt(rest, delta)) {
+                            addr = OBJ_BASE + visibleLabels[labelPart] + delta;
+                            resolved = true;
+                        }
+                    }
+                    if (!resolved && parseInt(adrStr, addr)) {
+                        addr &= 0xFFFF;
+                        resolved = true;
+                    }
+                    if (!resolved) {
+                        // レジスタ間指定（op gr1,gr2形式）→ 0xFF00 | GR番号
+                        // ※VMが getOperand でレジスタ間演算として解釈（8/13追加）
+                        int reg2 = 0;
+                        if (parseGR(adrStr, reg2)) {
+                            addr = 0xFF00 | reg2;
+                        } else if (type == 5) {
+                        // IN/OUTの領域はラベル必須
+                        result.error = "LABEL ERROR: アドレス '" + adrStr +
+                                       "' が見つからない（行" +
+                                       std::to_string(line.lineNo) + "）";
+                        return result;
+                    } else {
+                        result.error = "LABEL ERROR: ラベル '" + adrStr +
+                                       "' が見つからない（行" +
+                                       std::to_string(line.lineNo) + "）";
+                        return result;
+                    }
+                }
                 }
             }
             result.obj.push_back(static_cast<uint16_t>(addr));
@@ -434,8 +612,8 @@ AsmResult assemble(const std::string& source) {
             // ワード3: 第2アドレス（IN/OUTの文字長領域）
             if (type == 5) {
                 int lenAddr = 0;
-                if (labels.count(lenStr)) {
-                    lenAddr = OBJ_BASE + labels[lenStr];
+                if (visibleLabels.count(lenStr)) {
+                    lenAddr = OBJ_BASE + visibleLabels[lenStr];
                 } else if (parseInt(lenStr, lenAddr)) {
                     lenAddr &= 0xFFFF;
                 } else {
@@ -447,6 +625,18 @@ AsmResult assemble(const std::string& source) {
                 result.obj.push_back(static_cast<uint16_t>(lenAddr));
             }
         }
+    }
+
+    // リテラル（=定数）をオブジェクト末尾に配置（数値・16進・文字定数に対応）
+    for (auto& key : literalKeys) {
+        int val = 0;
+        if (key.size() == 3 && key.front() == '\'' && key.back() == '\'') {
+            val = static_cast<uint8_t>(key[1]);  // 文字定数（'5' → 0x35）
+        } else if (!parseInt(key, val)) {
+            result.error = "LITERAL ERROR: リテラルの値が不正 '" + key + "'";
+            return result;
+        }
+        result.obj.push_back(static_cast<uint16_t>(val));
     }
 
     result.ok = true;
